@@ -1,0 +1,62 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/ratelimit",
+  "description": "A collage plugin that limits how fast one client can hit the site: a token bucket per client, per rule, answered with 429 once it is empty.",
+  "repository": "https://github.com/Elagoht/collage-ratelimit",
+  "config": {
+    "type": "object",
+    "description": "A collage plugin that limits how fast one client can hit the site: a token bucket per client, per rule, answered with 429 once it is empty.",
+    "properties": {
+      "maxKeys": {
+        "type": "integer",
+        "description": "MaxKeys is the most clients each rule keeps a bucket for. Past it, an arbitrary bucket is dropped to make room, which bounds memory however many addresses a flood comes from. Default 100000."
+      },
+      "rules": {
+        "type": "array",
+        "description": "Rules are tried in order and the first that matches a request counts it; a request no rule matches is not limited. Empty is one rule: every method but GET, HEAD and OPTIONS, everywhere, at half a request a second with a burst of ten.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "burst": {
+              "type": "integer",
+              "description": "Burst is how many requests a client can make at once before Rate applies, and the size of the bucket. Default Rate rounded up, at least one."
+            },
+            "methods": {
+              "type": "array",
+              "description": "Methods the rule matches. Empty is every method but GET, HEAD and OPTIONS; [\"*\"] is every method.",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pathPrefix": {
+              "type": "string",
+              "description": "PathPrefix the rule matches. Empty is \"/\", every path."
+            },
+            "rate": {
+              "type": "number",
+              "description": "Rate is how many requests a second the bucket refills by, and so the rate a client can keep up: 0.1 is one request every ten seconds."
+            }
+          }
+        }
+      },
+      "skip": {
+        "type": "array",
+        "description": "Skip are path prefixes never limited. Default [\"/_collage/\"], collage's own development endpoints.",
+        "items": {
+          "type": "string"
+        }
+      },
+      "trustProxy": {
+        "type": "boolean",
+        "description": "TrustProxy reads the client's address from X-Forwarded-For, or X-Real-IP, when the request came from a trusted proxy. Without it those headers are ignored: anybody can send them, and a limit keyed on them is a limit every client can step around by changing a header."
+      },
+      "trustedProxies": {
+        "type": "array",
+        "description": "TrustedProxies are the addresses and CIDR ranges of the proxies in front of the site. Empty trusts loopback and private addresses, which is what a reverse proxy on the same host or network has.",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
