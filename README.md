@@ -16,7 +16,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.23.0 or later.
+Requires collage v0.24.0 or later.
 
 ## Rules
 
@@ -95,9 +95,11 @@ static build or a command starts none.
 ## Skipped paths
 
 `Skip` lists path prefixes never limited, by default collage's own development
-endpoints under `/_collage/`. Rules match the path with its dot segments
-resolved, and a path is skipped only when it had none — collage's router does not
-clean paths, so `/_collage/../contact` is not a development endpoint.
+endpoints under `/_collage/`. collage redirects a path with dot segments or
+doubled slashes to its clean spelling before any middleware runs, so
+`/_collage/../contact` never reaches the plugin as spelled. The plugin does not
+rely on that alone: rules match the path with its dot segments resolved, and a
+path is skipped only when it had none.
 
 ## Configuration
 
@@ -134,3 +136,10 @@ address nor a range — each stops the application from starting.
 - A 429 is still a request the server received. This keeps a form from being
   submitted a thousand times a minute; it is not a defence against a flood that
   saturates the network before any request reaches Go.
+
+## Changes
+
+### v0.1.1
+
+- README: collage v0.24.0 cleans paths before middleware; the plugin keeps its own check on the cleaned path as a second line.
+- Requires collage v0.24.0.

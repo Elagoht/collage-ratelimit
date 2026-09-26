@@ -132,10 +132,15 @@ func TestSkip(t *testing.T) {
 			t.Fatal("a skipped path was limited")
 		}
 	}
-	// Not a development endpoint, however it is spelled.
+	// Not a development endpoint, however it is spelled: collage redirects a
+	// path with dot segments to its clean spelling before any middleware runs,
+	// and the plugin's own check on the cleaned path stays behind that.
+	if rec := do(h, http.MethodGet, "/_collage/../", "192.0.2.1:1"); rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != "/" {
+		t.Errorf("/_collage/../ = %d %q, want collage's redirect to /", rec.Code, rec.Header().Get("Location"))
+	}
 	do(h, http.MethodGet, "/", "192.0.2.1:1")
-	if rec := do(h, http.MethodGet, "/_collage/../", "192.0.2.1:1"); rec.Code != http.StatusTooManyRequests {
-		t.Errorf("a dot segment stepped around the limit: %d", rec.Code)
+	if rec := do(h, http.MethodGet, "/", "192.0.2.1:1"); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("/ after the redirect: %d, want the limit", rec.Code)
 	}
 }
 
