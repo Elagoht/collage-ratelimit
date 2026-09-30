@@ -36,7 +36,8 @@
               "type": "number",
               "description": "Rate is how many requests a second the bucket refills by, and so the rate a client can keep up: 0.1 is one request every ten seconds."
             }
-          }
+          },
+          "additionalProperties": false
         }
       },
       "skip": {
@@ -57,6 +58,7 @@
           "type": "string"
         }
       }
-    }
+    },
+    "additionalProperties": false
   }
 }
