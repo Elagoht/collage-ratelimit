@@ -128,8 +128,9 @@ address nor a range — each stops the application from starting.
   count on their own, so a client can make as many requests as the limit allows
   on each of them, and a restart forgets every bucket. A limit shared across
   instances needs a shared store, which this plugin does not have.
-- A static build renders without requests, so nothing is limited there — nor on
-  a statically exported site, which has no server of its own.
+- A static build's header capture (collage v0.52.0) is not limited and gets no
+  RateLimit headers, and a statically exported site has no server of its own, so
+  nothing is limited there.
 - Clients behind one NAT, or one corporate proxy, share an address and so share
   a bucket. Set rates for the busiest such address you expect, or key by
   something better with `KeyFunc`.

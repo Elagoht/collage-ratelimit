@@ -104,7 +104,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.6" }
+func (p *Plugin) Version() string { return "0.1.7" }
 
 // Init reads and checks the configuration and wraps every request.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
@@ -193,6 +193,12 @@ func (p *Plugin) prepare() error {
 
 func (p *Plugin) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A static build asking for its own files to capture their headers is
+		// not a client: it is neither counted nor given RateLimit headers.
+		if collage.IsCapture(r.Context()) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// Matched on the cleaned path, and skipped only when the path was clean
 		// already, so /_collage/../contact never passes as a development
 		// endpoint. collage v0.24.0 redirects such a path before any middleware
