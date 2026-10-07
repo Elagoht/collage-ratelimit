@@ -16,7 +16,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.50.0 or later.
+Requires collage v0.52.0 or later.
 
 ## Rules
 
@@ -139,6 +139,10 @@ address nor a range — each stops the application from starting.
   saturates the network before any request reaches Go.
 
 ## Changes
+
+### v0.1.7
+
+- Requires collage v0.52.0. A static build's header capture (`collage.IsCapture`) is neither counted nor given RateLimit headers, so a rule that limits GET requests no longer answers the build 429.
 
 ### v0.1.6
 
