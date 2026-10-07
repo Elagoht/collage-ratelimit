@@ -104,7 +104,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.5" }
+func (p *Plugin) Version() string { return "0.1.6" }
 
 // Init reads and checks the configuration and wraps every request.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
