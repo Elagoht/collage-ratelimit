@@ -16,7 +16,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.24.0 or later.
+Requires collage v0.50.0 or later.
 
 ## Rules
 
@@ -138,6 +138,10 @@ address nor a range — each stops the application from starting.
   saturates the network before any request reaches Go.
 
 ## Changes
+
+### v0.1.4
+
+- Requires collage v0.50.0. Plugin configuration is read with `collage.PluginConfig`, since `host.Config` is gone. Nothing else changes.
 
 ### v0.1.2
 

@@ -104,13 +104,15 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.3" }
+func (p *Plugin) Version() string { return "0.1.4" }
 
 // Init reads and checks the configuration and wraps every request.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
-	if err := host.Config(&p.opts); err != nil {
+	cfg, err := collage.PluginConfig(host, p.opts)
+	if err != nil {
 		return err
 	}
+	p.opts = cfg
 	if err := p.prepare(); err != nil {
 		return err
 	}
