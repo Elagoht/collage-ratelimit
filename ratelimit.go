@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/netip"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -134,6 +135,9 @@ func (p *Plugin) prepare() error {
 	}
 	if o.Skip == nil {
 		o.Skip = []string{"/_collage/", "/healthz", "/readyz"}
+	} else {
+		// A copy: the prefixes are trimmed below, and the slice is the caller's.
+		o.Skip = slices.Clone(o.Skip)
 	}
 	for i, prefix := range o.Skip {
 		if !strings.HasPrefix(prefix, "/") {

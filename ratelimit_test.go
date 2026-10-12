@@ -336,3 +336,12 @@ func TestShutdown(t *testing.T) {
 		t.Fatal("Shutdown did not return")
 	}
 }
+
+// Starting the plugin leaves the caller's Skip slice as it was.
+func TestSkipNotWrittenInto(t *testing.T) {
+	skip := []string{"/admin/", "/api/"}
+	site(t, ratelimit.New(ratelimit.Options{Skip: skip}))
+	if skip[0] != "/admin/" || skip[1] != "/api/" {
+		t.Errorf("Skip = %q, want the caller's slice untouched", skip)
+	}
+}
