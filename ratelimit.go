@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -88,6 +89,9 @@ type Plugin struct {
 	opts     Options
 	limiters []*limiter
 
+	log      *slog.Logger
+	warnOnce sync.Once
+
 	janitorOnce sync.Once
 	stopOnce    sync.Once
 	stop        chan struct{}
@@ -99,7 +103,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.2.0" }
+func (p *Plugin) Version() string { return "0.2.1" }
 
 // Init reads and checks the configuration and wraps every request.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
@@ -108,6 +112,7 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		return err
 	}
 	p.opts = cfg
+	p.log = host.Logger()
 	if err := p.prepare(); err != nil {
 		return err
 	}
@@ -218,7 +223,7 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 			key = p.opts.KeyFunc(r)
 		}
 		if key == "" {
-			key = clientKey(r)
+			key = p.clientKey(r)
 		}
 		d := l.take(key, time.Now())
 		h := w.Header()
@@ -280,11 +285,17 @@ func methodMatches(methods []string, method string) bool {
 // which believes X-Forwarded-For only from Server.TrustedProxies. When it
 // cannot tell — a forwarded chain with an entry that is not an address — the
 // connection's own address is the client, so an unknown client is still
-// limited rather than given a bucket per guess.
-func clientKey(r *http.Request) string {
+// limited rather than given a bucket per guess. The first time that happens
+// the plugin says so once, at Warn: a proxy that sends an unreadable chain
+// leaves every client behind it in one bucket.
+func (p *Plugin) clientKey(r *http.Request) string {
 	if addr := collage.ClientIP(r); addr.IsValid() {
 		return keyOf(addr)
 	}
+	p.warnOnce.Do(func() {
+		p.log.Warn("ratelimit: cannot tell the client from the forwarded chain, so the connection's address is the client (an unknown client is still limited); logged once",
+			"remoteAddr", r.RemoteAddr)
+	})
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr

@@ -2,6 +2,7 @@ package ratelimit_test
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -238,6 +239,18 @@ func TestClientAddress(t *testing.T) {
 		do(h, http.MethodPost, "/contact", "10.0.0.5:1", "X-Forwarded-For", "unknown")
 		if rec := do(h, http.MethodPost, "/contact", "10.0.0.5:1", "X-Forwarded-For", "unknown"); rec.Code != http.StatusTooManyRequests {
 			t.Error("an unknown client was not limited")
+		}
+	})
+	t.Run("the fallback is logged once, at Warn", func(t *testing.T) {
+		s := collagetest.NewSite(t, siteOptions(ratelimit.New(ratelimit.Options{Rules: rules}), behind("10.0.0.0/8"))...)
+		for range 3 {
+			do(s.App.Handler(), http.MethodPost, "/contact", "10.0.0.5:1", "X-Forwarded-For", "unknown")
+		}
+		if !s.Logs.Has(slog.LevelWarn, "ratelimit:", "unknown") {
+			t.Fatalf("no Warn naming the fallback; logs:\n%s", s.Logs)
+		}
+		if n := strings.Count(s.Logs.String(), "ratelimit: "); n != 1 {
+			t.Errorf("%d ratelimit records, want 1:\n%s", n, s.Logs)
 		}
 	})
 	t.Run("an IPv6 /64 is one client", func(t *testing.T) {
