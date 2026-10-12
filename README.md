@@ -16,7 +16,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.60.0 or later.
+Requires collage v0.61.0 or later.
 
 ## Rules
 
@@ -59,20 +59,16 @@ body, and `Cache-Control: no-store`.
 A client is its IP address, and an IPv6 client is its `/64` — the block one
 connection is usually handed, and can pick any address from.
 
-Behind a reverse proxy every request comes from the proxy, so set `TrustProxy`.
-The address is then read from `X-Forwarded-For` — walking it from the right, past
-every trusted proxy, to the first address that is not one — or from `X-Real-IP`
-when there is no `X-Forwarded-For`. Each proxy appends the address it was reached
-from, so what is to the right of that point was written by proxies you run, and
-what is to the left by the client, who can write anything there. The headers are
-believed only on a request that arrived from a trusted proxy.
-
-`TrustedProxies` lists the proxies' addresses and CIDR ranges. Empty trusts
-loopback and private addresses, which is what a proxy on the same host or network
-has; name them when the proxy is a CDN, whose addresses are public.
-
-Without `TrustProxy` the headers are ignored: anybody can send them, and a limit
-keyed on them is one every client steps around by changing a header.
+Behind a reverse proxy every request comes from the proxy, so list the proxies
+in collage's `Server.TrustedProxies` (addresses and CIDR ranges). The client is
+then `collage.ClientIP`: `X-Forwarded-For` walked from the right, past every
+trusted proxy, to the first address that is not one. Each proxy appends the
+address it was reached from, so what is to the right of that point was written
+by proxies you run, and what is to the left by the client, who can write
+anything there. With no `TrustedProxies` the header is ignored: anybody can send
+it, and a limit keyed on it is one every client steps around by changing a
+header. When a trusted proxy's chain holds an entry that is not an address, the
+connection's own address is the client, so the request is still limited.
 
 `KeyFunc`, from Go, names the client some other way — an API key, a session, a
 signed-in user. When it returns `""` the address is used.
@@ -95,7 +91,10 @@ static build or a command starts none.
 ## Skipped paths
 
 `Skip` lists path prefixes never limited, by default collage's own development
-endpoints under `/_collage/`. collage redirects a path with dot segments or
+endpoints under `/_collage/` and the health probes `/healthz` and `/readyz`. A
+prefix in `skip` or a rule's `pathPrefix` means the same with or without a
+trailing slash, and covers the path itself and everything under it: `/admin` is
+`/admin` and `/admin/users`, not `/administrator`. collage redirects a path with dot segments or
 doubled slashes to its clean spelling before any middleware runs, so
 `/_collage/../contact` never reaches the plugin as spelled. The plugin does not
 rely on that alone: rules match the path with its dot segments resolved, and a
@@ -110,17 +109,15 @@ path is skipped only when it had none.
       { "pathPrefix": "/login", "rate": 0.1, "burst": 5 },
       { "methods": ["POST", "PUT", "PATCH", "DELETE"], "rate": 0.5, "burst": 10 }
     ],
-    "trustProxy": true,
-    "trustedProxies": ["10.0.0.0/8"],
-    "skip": ["/_collage/", "/healthz"],
+    "skip": ["/_collage/", "/healthz", "/readyz", "/api/webhooks"],
     "maxKeys": 100000
   }
 }
 ```
 
 Rules in configuration replace the ones given in Go. A rate that is not positive,
-a path or skip prefix without a leading `/`, a trusted proxy that is neither an
-address nor a range — each stops the application from starting.
+a path or skip prefix without a leading `/`, a key the plugin does not have —
+each stops the application from starting.
 
 ## Limitations
 
@@ -139,6 +136,21 @@ address nor a range — each stops the application from starting.
   saturates the network before any request reaches Go.
 
 ## Changes
+
+### Changed in v0.2.0
+
+- `trustProxy` and `trustedProxies` are removed; an old configuration naming
+  them stops at start with "unknown key". Set collage's `Server.TrustedProxies`
+  instead: the client is now `collage.ClientIP`.
+  - The default trusts no proxy. v0.1 trusted loopback and private addresses
+    when `trustProxy` was on with no `trustedProxies`; list them in
+    `Server.TrustedProxies` if your proxy is one.
+  - `X-Real-IP` is no longer read; only `X-Forwarded-For`, from a trusted proxy.
+- `skip` defaults to `["/_collage/", "/healthz", "/readyz"]`.
+- `skip` and `pathPrefix` match whole path segments, with or without a trailing
+  slash: `"/login"` no longer covers `/login-help`, and `"/admin/"` now covers
+  `/admin` itself.
+- Requires collage v0.61.0.
 
 ### v0.1.8
 

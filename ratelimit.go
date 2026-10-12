@@ -52,17 +52,10 @@ type Options struct {
 	// user. Unset, or returning "", the client is its IP address. It can only be
 	// set from Go.
 	KeyFunc func(r *http.Request) string `json:"-"`
-	// TrustProxy reads the client's address from X-Forwarded-For, or X-Real-IP,
-	// when the request came from a trusted proxy. Without it those headers are
-	// ignored: anybody can send them, and a limit keyed on them is a limit every
-	// client can step around by changing a header.
-	TrustProxy bool `json:"trustProxy"`
-	// TrustedProxies are the addresses and CIDR ranges of the proxies in front of
-	// the site. Empty trusts loopback and private addresses, which is what a
-	// reverse proxy on the same host or network has.
-	TrustedProxies []string `json:"trustedProxies"`
-	// Skip are path prefixes never limited. Default ["/_collage/"], collage's own
-	// development endpoints.
+	// Skip are path prefixes never limited. Default ["/_collage/", "/healthz",
+	// "/readyz"]: collage's own development endpoints and the health probes. A
+	// prefix means the same with or without a trailing slash: "/admin" skips
+	// /admin and everything under it, not /administrator.
 	Skip []string `json:"skip"`
 	// MaxKeys is the most clients each rule keeps a bucket for. Past it, an
 	// arbitrary bucket is dropped to make room, which bounds memory however many
@@ -75,7 +68,9 @@ type Rule struct {
 	// Methods the rule matches. Empty is every method but GET, HEAD and OPTIONS;
 	// ["*"] is every method.
 	Methods []string `json:"methods"`
-	// PathPrefix the rule matches. Empty is "/", every path.
+	// PathPrefix the rule matches: the path itself and everything under it,
+	// with or without a trailing slash ("/login" is /login and /login/…, not
+	// /login-help). Empty is "/", every path.
 	PathPrefix string `json:"pathPrefix"`
 	// Rate is how many requests a second the bucket refills by, and so the rate a
 	// client can keep up: 0.1 is one request every ten seconds.
@@ -90,7 +85,6 @@ var _ collage.Plugin = (*Plugin)(nil)
 // Plugin limits requests.
 type Plugin struct {
 	opts     Options
-	trusted  []netip.Prefix
 	limiters []*limiter
 
 	janitorOnce sync.Once
@@ -104,7 +98,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.8" }
+func (p *Plugin) Version() string { return "0.2.0" }
 
 // Init reads and checks the configuration and wraps every request.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
@@ -139,12 +133,13 @@ func (p *Plugin) prepare() error {
 		o.Rules = []Rule{{Rate: 0.5, Burst: 10}}
 	}
 	if o.Skip == nil {
-		o.Skip = []string{"/_collage/"}
+		o.Skip = []string{"/_collage/", "/healthz", "/readyz"}
 	}
-	for _, prefix := range o.Skip {
+	for i, prefix := range o.Skip {
 		if !strings.HasPrefix(prefix, "/") {
 			return fmt.Errorf("ratelimit: skip prefix %q must begin with /", prefix)
 		}
+		o.Skip[i] = trimSlash(prefix)
 	}
 	if o.MaxKeys < 0 {
 		return errors.New("ratelimit: maxKeys cannot be negative")
@@ -169,6 +164,7 @@ func (p *Plugin) prepare() error {
 		if !strings.HasPrefix(rule.PathPrefix, "/") {
 			return fmt.Errorf("ratelimit: rule %d: path prefix %q must begin with /", i, rule.PathPrefix)
 		}
+		rule.PathPrefix = trimSlash(rule.PathPrefix)
 		for j, m := range rule.Methods {
 			if m == "" || strings.ContainsAny(m, " \t,") {
 				return fmt.Errorf("ratelimit: rule %d: method %q is not a method", i, m)
@@ -176,17 +172,6 @@ func (p *Plugin) prepare() error {
 			rule.Methods[j] = strings.ToUpper(m)
 		}
 		p.limiters = append(p.limiters, &limiter{rule: *rule, max: o.MaxKeys, buckets: map[string]*bucket{}})
-	}
-	for _, s := range o.TrustedProxies {
-		prefix, err := netip.ParsePrefix(s)
-		if err != nil {
-			addr, addrErr := netip.ParseAddr(s)
-			if addrErr != nil {
-				return fmt.Errorf("ratelimit: trusted proxy %q is neither an address nor a CIDR range", s)
-			}
-			prefix = netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen())
-		}
-		p.trusted = append(p.trusted, prefix.Masked())
 	}
 	return nil
 }
@@ -206,7 +191,7 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 		clean := cleanPath(r.URL.Path)
 		if clean == r.URL.Path {
 			for _, prefix := range p.opts.Skip {
-				if strings.HasPrefix(clean, prefix) {
+				if under(clean, prefix) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -223,7 +208,7 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 			key = p.opts.KeyFunc(r)
 		}
 		if key == "" {
-			key = p.clientIP(r)
+			key = clientKey(r)
 		}
 		d := l.take(key, time.Now())
 		h := w.Header()
@@ -246,7 +231,7 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 // match returns the limiter of the first rule a request matches, or nil.
 func (p *Plugin) match(method, urlPath string) *limiter {
 	for _, l := range p.limiters {
-		if strings.HasPrefix(urlPath, l.rule.PathPrefix) && methodMatches(l.rule.Methods, method) {
+		if under(urlPath, l.rule.PathPrefix) && methodMatches(l.rule.Methods, method) {
 			return l
 		}
 	}
@@ -281,58 +266,45 @@ func methodMatches(methods []string, method string) bool {
 	return false
 }
 
-// clientIP returns the address r came from, as a bucket key.
-//
-// Behind trusted proxies it walks X-Forwarded-For from the right, past every
-// proxy the site trusts, and takes the first address that is not one: each
-// proxy appends the address it was reached from, so everything to the right of
-// that point was written by a proxy the site runs, and everything to the left by
-// the client, who can write anything there.
-func (p *Plugin) clientIP(r *http.Request) string {
+// clientKey is the bucket a request's client counts against: collage.ClientIP,
+// which believes X-Forwarded-For only from Server.TrustedProxies. When it
+// cannot tell — a forwarded chain with an entry that is not an address — the
+// connection's own address is the client, so an unknown client is still
+// limited rather than given a bucket per guess.
+func clientKey(r *http.Request) string {
+	if addr := collage.ClientIP(r); addr.IsValid() {
+		return keyOf(addr)
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return host
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return keyOf(addr.Unmap())
 	}
-	addr = addr.Unmap()
-	if !p.opts.TrustProxy || !p.isTrusted(addr) {
-		return keyOf(addr)
-	}
-	if values := r.Header.Values("X-Forwarded-For"); len(values) > 0 {
-		hops := strings.Split(strings.Join(values, ","), ",")
-		for i := len(hops) - 1; i >= 0; i-- {
-			hop, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
-			if err != nil {
-				// A trusted proxy writes an address; this was written by the
-				// client, so the nearest trusted hop is as far as can be told.
-				break
-			}
-			addr = hop.Unmap()
-			if !p.isTrusted(addr) {
-				break
-			}
-		}
-		return keyOf(addr)
-	}
-	if realIP, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP"))); err == nil {
-		return keyOf(realIP.Unmap())
-	}
-	return keyOf(addr)
+	return host
 }
 
-func (p *Plugin) isTrusted(addr netip.Addr) bool {
-	if p.trusted == nil {
-		return addr.IsLoopback() || addr.IsPrivate()
-	}
-	for _, prefix := range p.trusted {
-		if prefix.Contains(addr) {
-			return true
+// trimSlash is a path prefix without its trailing slash, "/" itself excepted,
+// so "/admin" and "/admin/" are one prefix.
+func trimSlash(prefix string) string {
+	if prefix != "/" {
+		prefix = strings.TrimRight(prefix, "/")
+		if prefix == "" {
+			prefix = "/"
 		}
 	}
-	return false
+	return prefix
+}
+
+// under reports whether urlPath is prefix or lies beneath it: "/admin" covers
+// /admin and /admin/users, not /administrator. prefix has been through
+// trimSlash.
+func under(urlPath, prefix string) bool {
+	if prefix == "/" {
+		return true
+	}
+	return urlPath == prefix || strings.HasPrefix(urlPath, prefix+"/")
 }
 
 // keyOf is the bucket an address counts against. An IPv6 client is usually handed

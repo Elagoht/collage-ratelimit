@@ -2,47 +2,40 @@ package ratelimit_test
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	ratelimit "github.com/Elagoht/collage-ratelimit"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
-func site(t *testing.T, p *ratelimit.Plugin, config map[string]json.RawMessage) http.Handler {
-	t.Helper()
-	app, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<main>home</main>`)},
-		}, Root: "t"},
-		Plugins:      []collage.Plugin{p},
-		PluginConfig: config,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
-		t.Fatal(err)
-	}
+// siteOptions is a site with the plugin p, POST actions at /contact and
+// /login, and the home page at /; more adds to it.
+func siteOptions(p *ratelimit.Plugin, more ...collagetest.SiteOption) []collagetest.SiteOption {
+	options := []collagetest.SiteOption{collagetest.WithPlugins(p)}
 	for _, path := range []string{"/contact", "/login"} {
-		action := collage.NewAction(strings.TrimPrefix(path, "/")).WithPath("en", path).
+		options = append(options, collagetest.WithRegister(collage.NewAction(strings.TrimPrefix(path, "/")).WithPath("en", path).
 			WithMethods(http.MethodPost).WithoutCSRF().
 			WithHandler(func(context.Context, *collage.RenderContext) (*collage.ActionResult, error) {
 				return nil, nil
-			}).Build()
-		if err := app.RegisterAction(action); err != nil {
-			t.Fatal(err)
-		}
+			}).Build()))
 	}
-	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
-	return app.Handler()
+	return append(options, more...)
+}
+
+func site(t *testing.T, p *ratelimit.Plugin, more ...collagetest.SiteOption) http.Handler {
+	t.Helper()
+	return collagetest.NewSite(t, siteOptions(p, more...)...).App.Handler()
+}
+
+// behind is a site whose Server.TrustedProxies lists proxies.
+func behind(proxies ...string) collagetest.SiteOption {
+	return collagetest.WithConfig(func(c *collage.Config) { c.Server.TrustedProxies = proxies })
 }
 
 func do(h http.Handler, method, path, remote string, headers ...string) *httptest.ResponseRecorder {
@@ -68,7 +61,7 @@ func allowed(h http.Handler, n int, method, path, remote string, headers ...stri
 
 // By default forms and actions are limited, at a burst of ten; pages are not.
 func TestDefaults(t *testing.T) {
-	h := site(t, ratelimit.New(ratelimit.Options{}), nil)
+	h := site(t, ratelimit.New(ratelimit.Options{}))
 	if got := allowed(h, 30, http.MethodGet, "/", "192.0.2.1:1"); got != 30 {
 		t.Errorf("GET was limited after %d requests", got)
 	}
@@ -109,7 +102,7 @@ func TestFirstMatchingRule(t *testing.T) {
 	h := site(t, ratelimit.New(ratelimit.Options{Rules: []ratelimit.Rule{
 		{PathPrefix: "/login", Rate: 0.01, Burst: 2},
 		{Methods: []string{"*"}, Rate: 0.01, Burst: 5},
-	}}), nil)
+	}}))
 	if got := allowed(h, 10, http.MethodPost, "/login", "192.0.2.1:1"); got != 2 {
 		t.Errorf("login allowed %d, want 2", got)
 	}
@@ -126,7 +119,7 @@ func TestFirstMatchingRule(t *testing.T) {
 
 // collage's development endpoints are never limited.
 func TestSkip(t *testing.T) {
-	h := site(t, ratelimit.New(ratelimit.Options{Rules: []ratelimit.Rule{{Methods: []string{"*"}, Rate: 0.01, Burst: 1}}}), nil)
+	h := site(t, ratelimit.New(ratelimit.Options{Rules: []ratelimit.Rule{{Methods: []string{"*"}, Rate: 0.01, Burst: 1}}}))
 	for range 5 {
 		if rec := do(h, http.MethodGet, "/_collage/anything", "192.0.2.1:1"); rec.Code == http.StatusTooManyRequests {
 			t.Fatal("a skipped path was limited")
@@ -144,9 +137,49 @@ func TestSkip(t *testing.T) {
 	}
 }
 
+// Health probes are skipped by default, as collage's own endpoints are.
+func TestSkipProbes(t *testing.T) {
+	h := site(t, ratelimit.New(ratelimit.Options{Rules: []ratelimit.Rule{{Methods: []string{"*"}, Rate: 0.01, Burst: 1}}}))
+	for _, path := range []string{"/healthz", "/readyz"} {
+		for range 3 {
+			if rec := do(h, http.MethodGet, path, "192.0.2.1:1"); rec.Code == http.StatusTooManyRequests {
+				t.Fatalf("%s was limited", path)
+			}
+		}
+	}
+}
+
+// A prefix key means the same with or without its trailing slash, and covers
+// the path itself and everything under it, not a longer name.
+func TestPrefixTrailingSlash(t *testing.T) {
+	limited := func(h http.Handler, path string) bool {
+		do(h, http.MethodGet, path, "192.0.2.9:1")
+		return do(h, http.MethodGet, path, "192.0.2.9:1").Code == http.StatusTooManyRequests
+	}
+	for _, prefix := range []string{"/admin", "/admin/"} {
+		h := site(t, ratelimit.New(ratelimit.Options{
+			Rules: []ratelimit.Rule{{Methods: []string{"*"}, PathPrefix: prefix, Rate: 0.01, Burst: 1}},
+		}))
+		for path, want := range map[string]bool{"/admin": true, "/admin/": true, "/admin/users": true, "/administrator": false} {
+			if got := limited(h, path); got != want {
+				t.Errorf("pathPrefix %q: %s limited = %v, want %v", prefix, path, got, want)
+			}
+		}
+		h = site(t, ratelimit.New(ratelimit.Options{
+			Rules: []ratelimit.Rule{{Methods: []string{"*"}, Rate: 0.01, Burst: 1}},
+			Skip:  []string{prefix},
+		}))
+		for path, want := range map[string]bool{"/admin": false, "/admin/users": false, "/administrator": true} {
+			if got := limited(h, path); got != want {
+				t.Errorf("skip %q: %s limited = %v, want %v", prefix, path, got, want)
+			}
+		}
+	}
+}
+
 // The bucket refills at the rule's rate.
 func TestRefill(t *testing.T) {
-	h := site(t, ratelimit.New(ratelimit.Options{Rules: []ratelimit.Rule{{Rate: 10, Burst: 1}}}), nil)
+	h := site(t, ratelimit.New(ratelimit.Options{Rules: []ratelimit.Rule{{Rate: 10, Burst: 1}}}))
 	if do(h, http.MethodPost, "/contact", "192.0.2.1:1").Code != http.StatusNoContent ||
 		do(h, http.MethodPost, "/contact", "192.0.2.1:1").Code != http.StatusTooManyRequests {
 		t.Fatal("a burst of one allowed more than one")
@@ -157,19 +190,20 @@ func TestRefill(t *testing.T) {
 	}
 }
 
-// X-Forwarded-For is anybody's to send, so it counts only from a trusted proxy,
-// and only its right-most untrusted hop.
+// X-Forwarded-For is anybody's to send, so it counts only from a proxy the
+// application trusts (Server.TrustedProxies), and only its right-most untrusted
+// hop: the client is collage.ClientIP.
 func TestClientAddress(t *testing.T) {
 	rules := []ratelimit.Rule{{Rate: 0.01, Burst: 1}}
-	t.Run("ignored without TrustProxy", func(t *testing.T) {
-		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules}), nil)
-		do(h, http.MethodPost, "/contact", "192.0.2.1:1", "X-Forwarded-For", "198.51.100.1")
-		if rec := do(h, http.MethodPost, "/contact", "192.0.2.1:1", "X-Forwarded-For", "198.51.100.2"); rec.Code != http.StatusTooManyRequests {
+	t.Run("ignored without TrustedProxies", func(t *testing.T) {
+		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules}))
+		do(h, http.MethodPost, "/contact", "10.0.0.5:1", "X-Forwarded-For", "198.51.100.1")
+		if rec := do(h, http.MethodPost, "/contact", "10.0.0.5:1", "X-Forwarded-For", "198.51.100.2"); rec.Code != http.StatusTooManyRequests {
 			t.Error("a changed header bought a fresh bucket")
 		}
 	})
 	t.Run("behind a trusted proxy", func(t *testing.T) {
-		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules, TrustProxy: true}), nil)
+		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules}), behind("10.0.0.0/8"))
 		proxy := "10.0.0.5:1"
 		do(h, http.MethodPost, "/contact", proxy, "X-Forwarded-For", "203.0.113.9, 198.51.100.1, 10.0.0.4")
 		// The client forged a left-most hop; the proxy's entry is what counts.
@@ -179,22 +213,35 @@ func TestClientAddress(t *testing.T) {
 		if rec := do(h, http.MethodPost, "/contact", proxy, "X-Forwarded-For", "198.51.100.2"); rec.Code != http.StatusNoContent {
 			t.Error("two clients behind one proxy shared a bucket")
 		}
-		if rec := do(h, http.MethodPost, "/contact", proxy, "X-Real-IP", "198.51.100.3"); rec.Code != http.StatusNoContent {
-			t.Error("X-Real-IP was not read")
-		}
-		if rec := do(h, http.MethodPost, "/contact", proxy, "X-Real-IP", "198.51.100.3"); rec.Code != http.StatusTooManyRequests {
-			t.Error("X-Real-IP did not key the bucket")
+		// X-Real-IP is not read: the proxy itself is the client then.
+		do(h, http.MethodPost, "/contact", proxy, "X-Real-IP", "198.51.100.3")
+		if rec := do(h, http.MethodPost, "/contact", proxy, "X-Real-IP", "198.51.100.4"); rec.Code != http.StatusTooManyRequests {
+			t.Error("X-Real-IP keyed the bucket")
 		}
 	})
 	t.Run("from an untrusted address", func(t *testing.T) {
-		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules, TrustProxy: true, TrustedProxies: []string{"10.0.0.0/8"}}), nil)
+		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules}), behind("10.0.0.0/8"))
 		do(h, http.MethodPost, "/contact", "192.0.2.7:1", "X-Forwarded-For", "198.51.100.1")
 		if rec := do(h, http.MethodPost, "/contact", "192.0.2.7:1", "X-Forwarded-For", "198.51.100.2"); rec.Code != http.StatusTooManyRequests {
 			t.Error("a header from a client that is not a proxy was believed")
 		}
 	})
+	t.Run("private addresses are not trusted by default", func(t *testing.T) {
+		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules}))
+		do(h, http.MethodPost, "/contact", "127.0.0.1:1", "X-Forwarded-For", "198.51.100.1")
+		if rec := do(h, http.MethodPost, "/contact", "127.0.0.1:1", "X-Forwarded-For", "198.51.100.2"); rec.Code != http.StatusTooManyRequests {
+			t.Error("loopback's X-Forwarded-For was believed with no TrustedProxies")
+		}
+	})
+	t.Run("an unreadable chain falls back to the connection", func(t *testing.T) {
+		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules}), behind("10.0.0.0/8"))
+		do(h, http.MethodPost, "/contact", "10.0.0.5:1", "X-Forwarded-For", "unknown")
+		if rec := do(h, http.MethodPost, "/contact", "10.0.0.5:1", "X-Forwarded-For", "unknown"); rec.Code != http.StatusTooManyRequests {
+			t.Error("an unknown client was not limited")
+		}
+	})
 	t.Run("an IPv6 /64 is one client", func(t *testing.T) {
-		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules}), nil)
+		h := site(t, ratelimit.New(ratelimit.Options{Rules: rules}))
 		do(h, http.MethodPost, "/contact", "[2001:db8:1:2::1]:1")
 		if rec := do(h, http.MethodPost, "/contact", "[2001:db8:1:2::ffff]:1"); rec.Code != http.StatusTooManyRequests {
 			t.Error("another address in the same /64 bought a fresh bucket")
@@ -205,12 +252,24 @@ func TestClientAddress(t *testing.T) {
 	})
 }
 
+// trustProxy and trustedProxies are gone: Server.TrustedProxies says which
+// proxies to believe. The old keys stop the application.
+func TestRemovedKeys(t *testing.T) {
+	for _, config := range []string{`{"trustProxy": true}`, `{"trustedProxies": ["10.0.0.0/8"]}`} {
+		_, err := collagetest.TrySite(t, siteOptions(ratelimit.New(ratelimit.Options{}),
+			collagetest.WithPluginConfig(ratelimit.Name, config))...)
+		if err == nil || !strings.Contains(err.Error(), "unknown key") {
+			t.Errorf("%s: start = %v, want an unknown key", config, err)
+		}
+	}
+}
+
 // KeyFunc names the client, and an empty key falls back to the address.
 func TestKeyFunc(t *testing.T) {
 	h := site(t, ratelimit.New(ratelimit.Options{
 		Rules:   []ratelimit.Rule{{Rate: 0.01, Burst: 1}},
 		KeyFunc: func(r *http.Request) string { return r.Header.Get("X-API-Key") },
-	}), nil)
+	}))
 	do(h, http.MethodPost, "/contact", "192.0.2.1:1", "X-API-Key", "a")
 	if rec := do(h, http.MethodPost, "/contact", "192.0.2.2:1", "X-API-Key", "a"); rec.Code != http.StatusTooManyRequests {
 		t.Error("one key from two addresses got two buckets")
@@ -225,7 +284,7 @@ func TestKeyFunc(t *testing.T) {
 
 // Past MaxKeys a bucket is dropped to make room: memory is bounded.
 func TestMaxKeys(t *testing.T) {
-	h := site(t, ratelimit.New(ratelimit.Options{Rules: []ratelimit.Rule{{Rate: 0.01, Burst: 1}}, MaxKeys: 1}), nil)
+	h := site(t, ratelimit.New(ratelimit.Options{Rules: []ratelimit.Rule{{Rate: 0.01, Burst: 1}}, MaxKeys: 1}))
 	do(h, http.MethodPost, "/contact", "192.0.2.1:1")
 	do(h, http.MethodPost, "/contact", "192.0.2.2:1")
 	if rec := do(h, http.MethodPost, "/contact", "192.0.2.1:1"); rec.Code != http.StatusNoContent {
@@ -235,9 +294,8 @@ func TestMaxKeys(t *testing.T) {
 
 // Configuration overlays the options.
 func TestConfiguration(t *testing.T) {
-	h := site(t, ratelimit.New(ratelimit.Options{}), map[string]json.RawMessage{
-		ratelimit.Name: json.RawMessage(`{"rules": [{"methods": ["get"], "pathPrefix": "/", "rate": 0.01, "burst": 2}]}`),
-	})
+	h := site(t, ratelimit.New(ratelimit.Options{}),
+		collagetest.WithPluginConfig(ratelimit.Name, `{"rules": [{"methods": ["get"], "pathPrefix": "/", "rate": 0.01, "burst": 2}]}`))
 	if got := allowed(h, 5, http.MethodGet, "/", "192.0.2.1:1"); got != 2 {
 		t.Errorf("allowed %d, want 2", got)
 	}
@@ -250,13 +308,12 @@ func TestMisconfiguration(t *testing.T) {
 		"negative burst": {Rules: []ratelimit.Rule{{Rate: 1, Burst: -1}}},
 		"relative path":  {Rules: []ratelimit.Rule{{Rate: 1, PathPrefix: "login"}}},
 		"bad method":     {Rules: []ratelimit.Rule{{Rate: 1, Methods: []string{"GET, POST"}}}},
-		"bad proxy":      {TrustedProxies: []string{"proxy.internal"}},
 		"bad skip":       {Skip: []string{"_collage"}},
 		"negative keys":  {MaxKeys: -1},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if rec := do(site(t, ratelimit.New(opts), nil), http.MethodGet, "/", "192.0.2.1:1"); rec.Code != http.StatusServiceUnavailable {
-				t.Errorf("status %d, want 503", rec.Code)
+			if _, err := collagetest.TrySite(t, siteOptions(ratelimit.New(opts))...); err == nil || !strings.Contains(err.Error(), "ratelimit:") {
+				t.Errorf("start = %v, want a ratelimit error", err)
 			}
 		})
 	}
@@ -265,7 +322,7 @@ func TestMisconfiguration(t *testing.T) {
 // Shutdown stops the janitor, and a second one is harmless.
 func TestShutdown(t *testing.T) {
 	p := ratelimit.New(ratelimit.Options{})
-	h := site(t, p, nil)
+	h := site(t, p)
 	do(h, http.MethodPost, "/contact", "192.0.2.1:1")
 	done := make(chan struct{})
 	go func() {
