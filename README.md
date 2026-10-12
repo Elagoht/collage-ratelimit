@@ -16,7 +16,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.61.2 or later.
+Requires collage v0.61.4 or later.
 
 ## Rules
 
@@ -142,7 +142,7 @@ each stops the application from starting.
 - When the client cannot be told from the forwarded chain (an entry that is not
   an address) and the connection's own address is used, the plugin logs it once,
   at Warn. Limiting is unchanged.
-- Requires collage v0.61.2.
+- Requires collage v0.61.4.
 
 ### Changed in v0.2.0
 
