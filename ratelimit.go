@@ -151,6 +151,12 @@ func (p *Plugin) prepare() error {
 	if o.MaxKeys == 0 {
 		o.MaxKeys = 100_000
 	}
+	// A copy, each rule's Methods too: the rules are normalized below, and the
+	// slices are the caller's.
+	o.Rules = slices.Clone(o.Rules)
+	for i := range o.Rules {
+		o.Rules[i].Methods = slices.Clone(o.Rules[i].Methods)
+	}
 	for i := range o.Rules {
 		rule := &o.Rules[i]
 		if rule.Rate <= 0 || math.IsInf(rule.Rate, 0) || math.IsNaN(rule.Rate) {

@@ -345,3 +345,14 @@ func TestSkipNotWrittenInto(t *testing.T) {
 		t.Errorf("Skip = %q, want the caller's slice untouched", skip)
 	}
 }
+
+// Starting the plugin leaves the caller's Rules as they were: the normalized
+// path prefix, methods and burst are the plugin's own copy.
+func TestRulesNotWrittenInto(t *testing.T) {
+	methods := []string{"post"}
+	rules := []ratelimit.Rule{{Methods: methods, PathPrefix: "/login/", Rate: 2}}
+	site(t, ratelimit.New(ratelimit.Options{Rules: rules}))
+	if r := rules[0]; r.PathPrefix != "/login/" || r.Burst != 0 || methods[0] != "post" {
+		t.Errorf("Rules = %+v, methods %q; want the caller's untouched", rules, methods)
+	}
+}
